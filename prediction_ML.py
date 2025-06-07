@@ -1,250 +1,134 @@
-# -*- coding: utf-8 -*-
-"""
-app_visualisation.py
-
-Streamlit : Visualisation Exploratoire des Données Udemy IA (Cours + Certificats)
-
-Affiche :
- - Figure 4.1 : Histogramme de la distribution des prix
- - Figure 4.2 : Boîtes à moustaches des prix par type (Cours vs Certificats)
- - Figure 4.3 : Relation prix vs nombre d'inscrits (scatter plot)
- - Figure 4.4 : Matrice de corrélation (heatmap) sur variables numériques
-"""
+# fichier : app_pricing_evaluation.py
 
 import streamlit as st
+import json
 import pandas as pd
 import numpy as np
-import json
-import os
-import plotly.express as px
-import seaborn as sns
+from sklearn.ensemble import RandomForestRegressor
+from sklearn.model_selection import train_test_split
+from sklearn.metrics import r2_score, mean_absolute_error, mean_squared_error, max_error
+from sentence_transformers import SentenceTransformer
 import matplotlib.pyplot as plt
+import seaborn as sns
+import joblib
+import os
 
-                                                                       
-                           
-                                                                       
-st.set_page_config(
-    page_title="🔎 EDA Udemy IA (Cours + Certificats)",
-    layout="wide",
-    initial_sidebar_state="expanded",
-)
+# === PARAMÈTRES ===
+DATA_PATH = "/home/mohamed/Bureau/all.json"
+MODEL_PATH = "./price_predictor.joblib"
+EMBEDDINGS_PATH = "./embeddings.npy"
+BATCH_SIZE = 8
 
-DATA_PATH = "/home/mohamed/Bureau/global_dataset.json"                                      
-
-                                                                       
-                                                
-                                                                       
-@st.cache_data(show_spinner=False)
-def load_and_clean_data(path: str) -> pd.DataFrame:
-    if not os.path.exists(path):
-        st.error(f"Le fichier JSON n'a pas été trouvé :\n    {path}")
-        return pd.DataFrame()
-
+# Nettoyage robuste des prix
+def clean_price(price):
+    if price in ['free', 'null', '', None]:
+        return 0.0
     try:
-        with open(path, "r", encoding="utf-8") as f:
-            data = json.load(f)
-    except Exception as e:
-        st.error(f"Impossible de lire le JSON : {e}")
-        return pd.DataFrame()
+        return float(price)
+    except:
+        return 0.0
 
+# Chargement des données
+@st.cache_data
+def load_data():
+    with open(DATA_PATH, "r", encoding="utf-8") as f:
+        data = json.load(f)
     df = pd.DataFrame(data)
-
-                                    
-    def clean_price(x):
-        if x is None:
-            return 0.0
-        if isinstance(x, str):
-            s = x.strip().lower()
-            if s in ("free", "null", ""):
-                return 0.0
-            s = s.replace("€", "").replace(",", ".").replace(" ", "")
-            try:
-                return float(s)
-            except:
-                return 0.0
-        try:
-            return float(x)
-        except:
-            return 0.0
-
-    if "current_price" not in df.columns:
-        st.warning("La colonne 'current_price' est absente. Remplissage à 0.0.")
-        df["price"] = 0.0
-    else:
-        df["price"] = df["current_price"].apply(clean_price)
-
-                                    
-    if "students_enrolled" in df.columns:
-        df["students_enrolled"] = pd.to_numeric(
-            df["students_enrolled"], errors="coerce"
-        ).fillna(0).astype(int)
-    else:
-                                                                 
-        df["students_enrolled"] = 0
-
-                                                         
-                                                            
-                                                 
-    numeric_cols = ["rating", "num_reviews", "duration"]
-    for col in numeric_cols:
-        if col in df.columns:
-            df[col] = pd.to_numeric(df[col], errors="coerce").fillna(0.0)
-        else:
-            df[col] = 0.0
-
-                                                           
-                                                              
-    for col in ["category", "level", "title", "description"]:
-        if col in df.columns:
-            df[col] = df[col].fillna("").astype(str)
-        else:
-            df[col] = ""
-
-                                                                    
-    def classify_type(cat: str) -> str:
-        cat_lower = cat.lower()
-                                                                                                                
-        if "certified" in cat_lower:
-            return "Certificat"
-                                               
-        return "Cours"
-
-    df["Type"] = df["category"].apply(classify_type)
-
+    df['price'] = df['current_price'].apply(clean_price)
+    df['fulltext'] = df['title'].fillna('') + " " + df['description'].fillna('')
     return df
 
+# Chargement du modèle de embeddings
+@st.cache_resource
+def load_embedder():
+    return SentenceTransformer("all-MiniLM-L6-v2")
 
-                                                                       
-                    
-                                                                       
-def main():
-    st.title("🔎 Exploration des Données Udemy IA (Cours + Certificats)")
+# Préparation et sauvegarde des embeddings
+@st.cache_resource
+def prepare_embeddings(df):
+    embedder = load_embedder()
+    embeddings = embedder.encode(df['fulltext'].tolist(), batch_size=BATCH_SIZE, show_progress_bar=True)
+    np.save(EMBEDDINGS_PATH, embeddings)
+    return embeddings
 
-    df = load_and_clean_data(DATA_PATH)
-    if df.empty:
-        st.stop()
+# Entrainement et sauvegarde du modèle
+@st.cache_resource
+def train_model(embeddings, prices):
+    X_train, X_test, y_train, y_test = train_test_split(embeddings, prices, test_size=0.2, random_state=42)
+    model = RandomForestRegressor(n_estimators=200, random_state=42)
+    model.fit(X_train, y_train)
+    joblib.dump(model, MODEL_PATH)
+    return model, X_test, y_test
 
-                                                      
-    st.sidebar.header("Filtres EDA")
-    types_list = ["Tous"] + sorted(df["Type"].unique().tolist())
-    type_filter = st.sidebar.selectbox("Type", types_list, index=0)
+# === STREAMLIT UI ===
+st.title("💰 Prédiction et Évaluation avancée de Prix IA (Cours & Certificats)")
+data = load_data()
 
-    cats = ["Tous"] + sorted(df["category"].unique().tolist())
-    cat_filter = st.sidebar.selectbox("Catégorie", cats, index=0)
+# Préparer embeddings et modèle
+if not os.path.exists(EMBEDDINGS_PATH):
+    st.info("💾 Calcul des embeddings...")
+    embeddings = prepare_embeddings(data)
+else:
+    embeddings = np.load(EMBEDDINGS_PATH)
 
-    lvls = ["Tous"] + sorted(df["level"].unique().tolist())
-    level_filter = st.sidebar.selectbox("Niveau", lvls, index=0)
+if not os.path.exists(MODEL_PATH):
+    st.info("🔧 Entrainement du modèle...")
+    model, X_test, y_test = train_model(embeddings, data['price'].values)
+else:
+    model = joblib.load(MODEL_PATH)
+    X_train, X_test, y_train, y_test = train_test_split(embeddings, data['price'].values, test_size=0.2, random_state=42)
 
-                           
-    df_filtered = df.copy()
-    if type_filter != "Tous":
-        df_filtered = df_filtered[df_filtered["Type"] == type_filter]
-    if cat_filter != "Tous":
-        df_filtered = df_filtered[df_filtered["category"] == cat_filter]
-    if level_filter != "Tous":
-        df_filtered = df_filtered[df_filtered["level"] == level_filter]
+# ÉVALUATION AVANCÉE
 
-    st.markdown(f"- Nombre d’enregistrements affichés : **{len(df_filtered):,}**")
+y_pred = model.predict(X_test)
+r2 = r2_score(y_test, y_pred)
+mae = mean_absolute_error(y_test, y_pred)
+mse = mean_squared_error(y_test, y_pred)
+rmse = np.sqrt(mse)
+max_err = max_error(y_test, y_pred)
 
-                                                                       
-                                                               
-                                                                       
-    st.subheader("Figure 4.1 – Histogramme de la distribution des prix")
-    fig1, ax1 = plt.subplots(figsize=(8, 4))
-    sns.histplot(
-        df_filtered["price"],
-        bins=50,
-        kde=True,
-        color="slateblue",
-        edgecolor="white",
-        alpha=0.75,
-        ax=ax1,
-    )
-    ax1.set_xlabel("Prix (€)")
-    ax1.set_ylabel("Nombre de cours+certificats")
-    ax1.set_title("Distribution des prix (Cours + Certificats)")
-    plt.tight_layout()
-    st.pyplot(fig1)
+st.subheader("📊 Évaluation avancée du modèle :")
+st.write(f"✅ Coefficient R² : **{r2*100:.2f}%**")
+st.write(f"✅ MAE (Erreur absolue moyenne) : **{mae:.2f} €**")
+st.write(f"✅ RMSE (Erreur quadratique moyenne) : **{rmse:.2f} €**")
+st.write(f"✅ Max Error : **{max_err:.2f} €**")
 
-                                                                       
-                                                             
-                                                                       
-    st.subheader("Figure 4.2 – Boîtes à moustaches des prix par Type")
-    fig2, ax2 = plt.subplots(figsize=(7, 4))
-    sns.boxplot(
-        x="Type",
-        y="price",
-        data=df_filtered,
-        palette={"Cours": "tomato", "Certificat": "mediumseagreen"},
-        ax=ax2,
-    )
-    ax2.set_xlabel("Type")
-    ax2.set_ylabel("Prix (€)")
-    ax2.set_title("Prix par Type : Cours vs Certificat")
-    plt.tight_layout()
-    st.pyplot(fig2)
+# Courbe prix réel vs prix prédit
+st.subheader("📈 Courbe Prix Réel vs Prix Prédit")
 
-                                                                       
-                                                                   
-                                                                       
-    st.subheader("Figure 4.3 – Relation entre le nombre d’inscrits et le prix")
-    fig3, ax3 = plt.subplots(figsize=(7, 4))
-                                                                     
-    sns.scatterplot(
-        x="students_enrolled",
-        y="price",
-        data=df_filtered,
-        hue="Type",
-        palette={"Cours": "tomato", "Certificat": "mediumseagreen"},
-        alpha=0.6,
-        ax=ax3,
-    )
-    ax3.set_xscale("log")
-    ax3.set_xlabel("Nombre d’inscrits (log)")
-    ax3.set_ylabel("Prix (€)")
-    ax3.set_title("Nombre d’inscrits vs Prix")
-    ax3.legend(title="Type")
-    plt.tight_layout()
-    st.pyplot(fig3)
+plt.figure(figsize=(8,6))
+sns.scatterplot(x=y_test, y=y_pred, color='blue', alpha=0.6)
+plt.plot([0, max(y_test)], [0, max(y_test)], color='red', linestyle='--')
+plt.xlabel("Prix Réel (€)")
+plt.ylabel("Prix Prédit (€)")
+plt.title("Comparaison des Prix Réels et Prédits")
+st.pyplot(plt)
 
-                                                                       
-                                                        
-                                                                       
-    st.subheader("Figure 4.4 – Matrice de corrélation (features numériques)")
-                                                                  
-    num_cols = ["price", "students_enrolled"]
-                                                     
-    if "rating" in df_filtered.columns:
-        num_cols.append("rating")
-    if "num_reviews" in df_filtered.columns:
-        num_cols.append("num_reviews")
-    if "duration" in df_filtered.columns:
-        num_cols.append("duration")
+# Distribution des erreurs
+st.subheader("📉 Distribution des erreurs de prédiction")
 
-    corr_df = df_filtered[num_cols].copy()
-    corr_mat = corr_df.corr()
+errors = y_test - y_pred
+plt.figure(figsize=(8,5))
+sns.histplot(errors, bins=30, kde=True, color='skyblue')
+plt.axvline(0, color='red', linestyle='--')
+plt.title("Distribution des erreurs (Prix Réel - Prédit)")
+plt.xlabel("Erreur (€)")
+plt.ylabel("Fréquence")
+st.pyplot(plt)
 
-    fig4, ax4 = plt.subplots(figsize=(5, 4))
-    sns.heatmap(
-        corr_mat,
-        annot=True,
-        fmt=".2f",
-        cmap="RdBu_r",
-        linewidths=0.5,
-        cbar_kws={"shrink": 0.7},
-        ax=ax4,
-    )
-    ax4.set_title("Matrice de corrélation")
-    plt.tight_layout()
-    st.pyplot(fig4)
+# Interface de prédiction pour l'utilisateur
 
-                                                                       
-                                                                   
-                                                                       
-    st.markdown("----")
-    st.subheader("Aperçu des données filtrées")
-    st.dataframe(df_filtered.head(10), use_container_width=True)
+st.header("📊 Tester une nouvelle prédiction de prix")
 
+title = st.text_input("Titre du cours :")
+description = st.text_area("Description du cours :")
 
-if __name__ == "__main__":
-    main()
+if st.button("Prédire le prix sur ce nouveau cours"):
+    if not title or not description:
+        st.warning("⚠️ Entrez un titre et une description avant de prédire.")
+    else:
+        embedder = load_embedder()
+        new_text = title + " " + description
+        new_embed = embedder.encode([new_text])
+        predicted_price = model.predict(new_embed)[0]
+        st.success(f"💰 Prix estimé : {predicted_price:.2f} €")
